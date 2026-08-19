@@ -13,3 +13,5 @@ Before you can run this application, you need to have a couple environment varia
 |`OLLAMA_URL`| The URL to access your Ollama API | `http://localhost:11434/api/generate` |
 |`TMDB_TOKEN`| The read token (not API key) for your [The Movie Database](https://www.themoviedb.org/) account | `eyJh-and-a-bunch-more-random-letters-M` |
 |`MEDIA_DIR`| The location where your media lives | `~/media/movies` |
+
+With those setup, you can download the latest executable from the [Releases](https://github.com/sturdy5/ai-subs/releases/). Running the `ai-subs` executable will go ahead and create your summaries in your `MEDIA_DIR`.
