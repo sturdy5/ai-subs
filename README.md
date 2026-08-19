@@ -15,3 +15,7 @@ Before you can run this application, you need to have a couple environment varia
 |`MEDIA_DIR`| The location where your media lives | `~/media/movies` |
 
 With those setup, you can download the latest executable from the [Releases](https://github.com/sturdy5/ai-subs/releases/). Running the `ai-subs` executable will go ahead and create your summaries in your `MEDIA_DIR`.
+
+### Setting up Ollama
+
+If you are also trying this out to see what its like to use local models, you can download Ollama from [here](http://ollama.com/download/). When you download it, you can run `ollama run llama3.2:1b`. That will open up a chat, but it will also initialize the API. You can exit out (`/exit`) of Ollama an the API will stay running.
