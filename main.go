@@ -35,6 +35,8 @@ type TMDBResponse struct {
 	Title string `json:"title"`
 }
 
+var aiModel = os.ExpandEnv("$AI_MODEL")
+
 func main() {
 	// Get the ollma URL and TMDB token from an environment variable
 	ollamaURL := os.ExpandEnv("$OLLAMA_URL")
@@ -56,9 +58,12 @@ func main() {
 			return nil
 		}
 
+		// Only process .srt files
 		if !d.IsDir() && strings.ToLower(filepath.Ext(path)) == ".srt" {
+			// Construct the corresponding NFO path
 			nfoPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".nfo"
 
+			// Check if the NFO file already contains our custom indicator
 			if isAlreadyProcessed(nfoPath) {
 				fmt.Printf("Skipping already processed movie: %s\n", d.Name())
 				return nil
@@ -66,7 +71,7 @@ func main() {
 
 			fmt.Printf("========================================\n")
 			fmt.Printf("Processing: %s\n", d.Name())
-			processMovieSubtitle(ollamaURL, tmdbToken, path)
+			processMovieSubtitle(ollamaURL, tmdbToken, path, nfoPath)
 			fmt.Printf("========================================\n\n")
 		}
 		return nil
@@ -77,6 +82,7 @@ func main() {
 	}
 }
 
+// Checks if the NFO file already contains our custom indicator to avoid reprocessing
 func isAlreadyProcessed(nfoPath string) bool {
 	if _, err := os.Stat(nfoPath); os.IsNotExist(err) {
 		return false // No file means it definitely isn't processed
@@ -91,18 +97,19 @@ func isAlreadyProcessed(nfoPath string) bool {
 	return strings.Contains(string(content), "<aisummary>processed</aisummary>")
 }
 
-func processMovieSubtitle(ollamaURL, tmdbToken, srtPath string) {
-	nfoPath := strings.TrimSuffix(srtPath, filepath.Ext(srtPath)) + ".nfo"
-
+// Processes a single movie subtitle file, generates a roasted summary, and updates the NFO file
+func processMovieSubtitle(ollamaURL, tmdbToken, srtPath, nfoPath string) {
 	cleanDialogue, err := parseSRT(srtPath)
 	if err != nil || len(cleanDialogue) == 0 {
 		fmt.Printf("Skipping file (could not parse or empty): %v\n", err)
 		return
 	}
 
+	// Split the dialogue into 4 chunks for summarization
 	chunks := splitTextIntoChunks(cleanDialogue, 4)
 	var chunkSummaries []string
 
+	// For each chunk, generate a concise summary using the Ollama API
 	for i, chunk := range chunks {
 		prompt := fmt.Sprintf(
 			"[INST] Summarize the key plot developments in this section of the movie script in 2 short sentences. Do not use meta-commentary. [/INST]\n\nDialogue: %s", 
@@ -114,9 +121,11 @@ func processMovieSubtitle(ollamaURL, tmdbToken, srtPath string) {
 			fmt.Printf("   Error processing chunk %d: %v\n", i+1, err)
 			return
 		}
+		// Append the summary for this chunk to the list of summaries
 		chunkSummaries = append(chunkSummaries, summary)
 	}
 
+	// Combine all chunk summaries into a single string for the final roasting prompt
 	combinedSummaries := strings.Join(chunkSummaries, " ")
 
 	crankyPrompt := fmt.Sprintf(
@@ -132,6 +141,7 @@ func processMovieSubtitle(ollamaURL, tmdbToken, srtPath string) {
 		combinedSummaries,
 	)
 
+	// Measure the time taken to generate the final roasted summary
 	startTime := time.Now()
 	finalResponse, err := callOllama(ollamaURL, crankyPrompt, 200)
 	if err != nil {
@@ -141,13 +151,14 @@ func processMovieSubtitle(ollamaURL, tmdbToken, srtPath string) {
 
 	fmt.Printf("Generated Roast (%v):\n\"%s\"\n\n", time.Since(startTime), finalResponse)
 
-	// Modified: Pass the TMDB token down to handle potential generation lookups
+	// Backup the original NFO and update it with the new roasted summary
 	err = backupAndUpdateNFO(nfoPath, tmdbToken, finalResponse)
 	if err != nil {
 		fmt.Printf("Failed to update NFO file: %v\n", err)
 	}
 }
 
+// Backs up the original NFO file and updates it with the new plot summary
 func backupAndUpdateNFO(nfoPath, tmdbToken, newPlot string) error {
 	backupPath := nfoPath + ".bak"
 
@@ -157,6 +168,7 @@ func backupAndUpdateNFO(nfoPath, tmdbToken, newPlot string) error {
 		return createMinimalNFO(nfoPath, tmdbToken, newPlot)
 	}
 
+	// Backup the original NFO if it doesn't already exist
 	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 		fmt.Println("Creating original NFO backup at:", filepath.Base(backupPath))
 		err := copyFile(nfoPath, backupPath)
@@ -170,8 +182,10 @@ func backupAndUpdateNFO(nfoPath, tmdbToken, newPlot string) error {
 		return err
 	}
 
+	// Use regex to find the <plot> tag and replace it with the new plot summary, or append if not found
 	content := string(input)
 	plotRegex := regexp.MustCompile(`(?s)<plot>.*?</plot>`)
+	// Construct the updated plot tag with our custom indicator
 	updatedPlotTag := fmt.Sprintf("<plot>%s</plot>\n  <aisummary>processed</aisummary>", newPlot)
 
 	var finalContent string
@@ -181,6 +195,7 @@ func backupAndUpdateNFO(nfoPath, tmdbToken, newPlot string) error {
 		finalContent = strings.Replace(content, "</movie>", fmt.Sprintf("  %s\n</movie>", updatedPlotTag), 1)
 	}
 
+	// Write the updated content back to the NFO file
 	err = os.WriteFile(nfoPath, []byte(finalContent), 0644)
 	if err != nil {
 		return err
@@ -190,23 +205,29 @@ func backupAndUpdateNFO(nfoPath, tmdbToken, newPlot string) error {
 	return nil
 }
 
+// Creates a minimal NFO file with the official title from TMDB and the new plot summary
 func createMinimalNFO(nfoPath, tmdbToken, newPlot string) error {
 	folderName := filepath.Base(filepath.Dir(nfoPath))
+	// Use regex to extract the TMDB ID from the folder name, if present
 	idRegex := regexp.MustCompile(`\[tmdbid-(\d+)\]`)
 	matches := idRegex.FindStringSubmatch(folderName)
 
+	// Default to using the folder name as the movie title if no TMDB ID is found
 	movieTitle := folderName
+	// If a TMDB ID is found, fetch the official title from TMDB
 	if len(matches) > 1 {
 		tmdbID := matches[1]
 		fmt.Printf("   Found TMDB ID: %s. Fetching official title...\n", tmdbID)
 		
 		fetchedTitle, err := fetchTitleFromTMDB(tmdbID, tmdbToken)
 		if err == nil && fetchedTitle != "" {
+			// If the title is successfully fetched, use it as the movie title
 			movieTitle = fetchedTitle
 			fmt.Printf("   TMDB Resolved Title: %s\n", movieTitle)
 		}
 	}
 	
+	// Construct a minimal NFO template with the movie title and new plot summary
 	template := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <movie>
   <title>%s</title>
@@ -217,7 +238,7 @@ func createMinimalNFO(nfoPath, tmdbToken, newPlot string) error {
 	return os.WriteFile(nfoPath, []byte(template), 0644)
 }
 
-// New Helper: Makes a secure HTTP request to TMDB API v4 using your Bearer token
+//  Makes a secure HTTP request to TMDB API v4 using your Bearer token
 func fetchTitleFromTMDB(tmdbID, token string) (string, error) {
 	url := fmt.Sprintf("https://api.themoviedb.org/3/movie/%s", tmdbID)
 	
@@ -252,12 +273,17 @@ func fetchTitleFromTMDB(tmdbID, token string) (string, error) {
 		return "", err
 	}
 
+	// Return the official title fetched from TMDB
 	return tmdbResp.Title, nil
 }
 
+// Calls the Ollama API with the provided prompt and returns the generated response
 func callOllama(url, prompt string, maxTokens int) (string, error) {
+	if aiModel == "" {
+		aiModel = "llama3.2:1b" // Default model if not set in environment
+	}
 	requestData := OllamaRequest{
-		Model:  "llama3.2:1b",
+		Model:  aiModel,
 		Prompt: prompt,
 		Stream: false,
 		Options: OllamaOptions{
@@ -288,15 +314,19 @@ func callOllama(url, prompt string, maxTokens int) (string, error) {
 		return "", err
 	}
 
+	// Return the trimmed response from Ollama
 	return strings.TrimSpace(ollamaResp.Response), nil
 }
 
+// Splits the input text into a specified number of chunks for processing
 func splitTextIntoChunks(text string, numChunks int) []string {
+	// Split the text into words and calculate the size of each chunk
 	words := strings.Fields(text)
 	totalWords := len(words)
 	chunkSize := totalWords / numChunks
 
 	var chunks []string
+	// Create each chunk by slicing the words array and joining them back into a string
 	for i := 0; i < numChunks; i++ {
 		start := i * chunkSize
 		end := start + chunkSize
@@ -309,6 +339,7 @@ func splitTextIntoChunks(text string, numChunks int) []string {
 	return chunks
 }
 
+// Parses an SRT subtitle file and extracts the dialogue lines, ignoring timestamps and sequence numbers
 func parseSRT(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -320,6 +351,7 @@ func parseSRT(filePath string) (string, error) {
 	var dialogueLines []string
 	scanner := bufio.NewScanner(file)
 
+	// Iterate through each line of the SRT file, filtering out empty lines, numeric sequence numbers, and timestamp lines
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || isNumeric(line) || timestampRegex.MatchString(line) {
@@ -331,6 +363,7 @@ func parseSRT(filePath string) (string, error) {
 	return strings.Join(dialogueLines, " "), scanner.Err()
 }
 
+// Checks if a string consists solely of numeric characters
 func isNumeric(s string) bool {
 	for _, c := range s {
 		if c < '0' || c > '9' {
@@ -340,6 +373,7 @@ func isNumeric(s string) bool {
 	return len(s) > 0
 }
 
+// Copies a file from the source path to the destination path
 func copyFile(src, dst string) error {
 	source, err := os.Open(src)
 	if err != nil {
